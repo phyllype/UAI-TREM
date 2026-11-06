@@ -24,6 +24,8 @@
 #define R_NO_REMAP
 #include <Rinternals.h>
 #include <chrono>
+#include <cstdlib>
+#include <R_ext/Print.h>
 
 namespace br {
 
@@ -136,6 +138,89 @@ int threads_disponiveis() {
 #else
   return 1;
 #endif
+}
+
+// PARTICAO DA ARVORE DE ELIMINACAO (T3 do E0, 2026-11-02). Na fatoracao olhando-para-cima a linha
+// k le so as colunas j da propria linha, que sao DESCENDENTES de k na arvore, e escreve so nelas
+// (L[k,j] na posicao prox[j]). Duas subarvores disjuntas nao compartilham coluna nenhuma: as linhas
+// de uma podem ser feitas por uma thread enquanto outra faz as da outra, cada linha com a MESMA
+// ordem de soma do laco serial, e o fator sai bit a bit o mesmo com qualquer numero de threads. A
+// ordem das entradas de cada coluna tambem nao muda: quem escreve na coluna j sao os ancestrais de
+// j, os da subarvore dela (feitos em ordem crescente pela mesma thread) e os do topo, que tem
+// indice maior que a raiz da subarvore e vem depois de todas elas. Na inversa seletiva e o
+// contrario: a coluna j le as colunas dos ancestrais, entao o topo vem ANTES e as subarvores
+// depois, cada uma de cima para baixo.
+//
+// A divisao e a gulosa de Geist e Ng (1989): parte das raizes e divide a subarvore mais pesada
+// (o no vai para o topo, os filhos entram no lugar) ate a mais pesada caber em 1/(8 nth) do total.
+// O peso de um no e o custo da coluna dele (c_j^2). Uma cadeia longa no alto da arvore vai inteira
+// para o topo: e serial aqui e continua sendo (a cauda densa e a largura das colunas cuidam dela).
+Particao particao_arvore(const std::vector<std::int64_t>& pai, const std::vector<double>& peso,
+                         std::size_t limite, int nth) {
+  Particao P;
+  const std::size_t n = pai.size();
+  limite = std::min(limite, n);
+  if (nth <= 1 || limite < 1024) return P;
+  std::vector<double> sw(n, 0.0);
+  for (std::size_t j = 0; j < limite; j++) sw[j] += peso[j];
+  for (std::size_t j = 0; j < limite; j++)
+    if (pai[j] >= 0 && static_cast<std::size_t>(pai[j]) < limite) sw[static_cast<std::size_t>(pai[j])] += sw[j];
+  std::vector<std::size_t> cini(limite + 1, 0);
+  for (std::size_t j = 0; j < limite; j++)
+    if (pai[j] >= 0 && static_cast<std::size_t>(pai[j]) < limite) cini[static_cast<std::size_t>(pai[j]) + 1]++;
+  for (std::size_t j = 0; j < limite; j++) cini[j + 1] += cini[j];
+  std::vector<std::uint32_t> fil(cini[limite]);
+  {
+    std::vector<std::size_t> pos(cini.begin(), cini.end() - 1);
+    for (std::size_t j = 0; j < limite; j++)
+      if (pai[j] >= 0 && static_cast<std::size_t>(pai[j]) < limite)
+        fil[pos[static_cast<std::size_t>(pai[j])]++] = static_cast<std::uint32_t>(j);
+  }
+  double total = 0.0;
+  std::vector<std::pair<double, std::uint32_t>> heap;
+  for (std::size_t j = 0; j < limite; j++)
+    if (pai[j] < 0 || static_cast<std::size_t>(pai[j]) >= limite) {
+      heap.emplace_back(sw[j], static_cast<std::uint32_t>(j));
+      total += sw[j];
+    }
+  // pouco trabalho na parte esparsa: o serial ganha (abrir a regiao paralela custa mais)
+  if (total < 2e7) return P;
+  std::make_heap(heap.begin(), heap.end());
+  const double alvo = total / (8.0 * static_cast<double>(nth));
+  std::vector<char> topo(n, 0);
+  for (std::size_t j = limite; j < n; j++) topo[j] = 1;
+  while (!heap.empty() && heap.front().first > alvo) {
+    std::pop_heap(heap.begin(), heap.end());
+    const std::uint32_t r = heap.back().second;
+    heap.pop_back();
+    topo[r] = 1;
+    for (std::size_t q = cini[r]; q < cini[r + 1]; q++) {
+      heap.emplace_back(sw[fil[q]], fil[q]);
+      std::push_heap(heap.begin(), heap.end());
+    }
+  }
+  if (heap.size() < 2) return P;
+  std::sort(heap.begin(), heap.end(), [](const std::pair<double, std::uint32_t>& x,
+                                         const std::pair<double, std::uint32_t>& y) {
+    return x.first != y.first ? x.first > y.first : x.second < y.second;
+  });
+  std::vector<std::int32_t> rot(n, -1);
+  for (std::size_t s2 = 0; s2 < heap.size(); s2++) rot[heap[s2].second] = static_cast<std::int32_t>(s2);
+  for (std::size_t j = limite; j-- > 0;) {
+    if (topo[j]) continue;
+    if (rot[j] < 0) rot[j] = rot[static_cast<std::size_t>(pai[j])];
+  }
+  P.ini.assign(heap.size() + 1, 0);
+  for (std::size_t j = 0; j < limite; j++) if (!topo[j]) P.ini[static_cast<std::size_t>(rot[j]) + 1]++;
+  for (std::size_t s2 = 0; s2 < heap.size(); s2++) P.ini[s2 + 1] += P.ini[s2];
+  P.nos.resize(P.ini.back());
+  {
+    std::vector<std::size_t> pos(P.ini.begin(), P.ini.end() - 1);
+    for (std::size_t j = 0; j < limite; j++)
+      if (!topo[j]) P.nos[pos[static_cast<std::size_t>(rot[j])]++] = static_cast<std::uint32_t>(j);
+  }
+  for (std::size_t j = 0; j < n; j++) if (topo[j]) P.topo.push_back(static_cast<std::uint32_t>(j));
+  return P;
 }
 
 // A CAUDA DENSA EM LADRILHOS. O bloco denso final do fator (o dense_block, as ultimas T
@@ -394,15 +479,10 @@ bool cholesky(const Csc& au, const Simbolica& sb, Csc& L) {
   const bool hibrido = T_cauda >= CAUDA_MINIMA;
   const std::size_t base = hibrido ? n - T_cauda : n;
 
-  // a interrupcao e conferida pelo RELOGIO, olhado a cada 64 colunas: uma coluna custa de
-  // nada (A^-1) a muito (enchimento), e contar colunas daria intervalos de segundos a minutos
-  using relogio = std::chrono::steady_clock;
-  relogio::time_point prox_checa = relogio::now() + std::chrono::milliseconds(250);
-  for (std::size_t k = 0; k < n; k++) {
-    if ((k & 63) == 0 && relogio::now() >= prox_checa) {
-      checa_interrupcao();
-      prox_checa = relogio::now() + std::chrono::milliseconds(250);
-    }
+  // A LINHA k do fator, com o rascunho (x, s, marca) de quem a faz. 0: feita; 1: a matriz nao e
+  // positiva-definida; 2: a simbolica e menor que o padrao (invariante de quem chama).
+  auto faz_linha = [&](std::size_t k, std::vector<double>& x, std::vector<std::uint32_t>& s,
+                       std::vector<std::uint32_t>& marca) -> int {
     const std::size_t topo = alcance(au, k, sb.pai, s, marca);
 
     if (k >= base) {
@@ -418,13 +498,12 @@ bool cholesky(const Csc& au, const Simbolica& sb, Csc& L) {
         // as linhas da coluna j estao em ordem crescente: as da cauda vem por ultimo
         for (std::size_t p = colptr[j] + 1; p < prox[j] && linha[p] < base; p++)
           x[linha[p]] -= valor[p] * lkj;
-        if (prox[j] >= colptr[j + 1])
-          throw Erro("symbolic factorization too small: the matrix pattern grew afterwards");
+        if (prox[j] >= colptr[j + 1]) return 2;
         linha[prox[j]] = static_cast<std::uint32_t>(k);
         valor[prox[j]] = lkj;
         prox[j]++;
       }
-      continue;
+      return 0;
     }
 
     double d = 0.0;
@@ -442,19 +521,114 @@ bool cholesky(const Csc& au, const Simbolica& sb, Csc& L) {
       d -= lkj * lkj;
       // Uma simbolica menor que o padrao real transbordaria a coluna j para a j+1 e
       // corromperia L sem erro nenhum. E invariante de quem chama, entao para aqui.
-      if (prox[j] >= colptr[j + 1])
-        throw Erro("symbolic factorization too small: the matrix pattern grew afterwards");
+      if (prox[j] >= colptr[j + 1]) return 2;
       linha[prox[j]] = static_cast<std::uint32_t>(k);
       valor[prox[j]] = lkj;
       prox[j]++;
     }
 
-    if (!(d > 0.0) || !std::isfinite(d)) return false;
+    if (!(d > 0.0) || !std::isfinite(d)) return 1;
     linha[prox[k]] = static_cast<std::uint32_t>(k);
     valor[prox[k]] = std::sqrt(d);   // a diagonal vai PRIMEIRO, e o laco acima conta com isso
     prox[k]++;
+    return 0;
+  };
+  auto falha = [](int rc) -> bool {
+    if (rc == 2) throw Erro("symbolic factorization too small: the matrix pattern grew afterwards");
+    return rc == 1;
+  };
+
+  // a interrupcao e conferida pelo RELOGIO, olhado a cada 64 colunas: uma coluna custa de
+  // nada (A^-1) a muito (enchimento), e contar colunas daria intervalos de segundos a minutos
+  using relogio = std::chrono::steady_clock;
+  relogio::time_point prox_checa = relogio::now() + std::chrono::milliseconds(250);
+  auto checa = [&](std::size_t q) {
+    if ((q & 63) == 0 && relogio::now() >= prox_checa) {
+      checa_interrupcao();
+      prox_checa = relogio::now() + std::chrono::milliseconds(250);
+    }
+  };
+
+  // as SUBARVORES em paralelo (particao_arvore), depois o TOPO em ordem crescente; com uma thread,
+  // ou pouco trabalho, o laco serial de sempre. As duas formas dao o mesmo fator bit a bit.
+  const int nth_part = threads();
+  Particao P;
+  if (nth_part > 1) {
+    std::vector<double> peso(n);
+    for (std::size_t j = 0; j < n; j++) {
+      const double c = static_cast<double>(sb.colptr[j + 1] - sb.colptr[j]);
+      peso[j] = c * c;
+    }
+    P = particao_arvore(sb.pai, peso, base, nth_part);
+  }
+  const char* t3e = std::getenv("UAITREM_T3_TEMPOS");
+  const bool diag_t = t3e && t3e[0] == '1';
+  auto agora = [] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  };
+  const double tt0 = diag_t ? agora() : 0.0;
+  double tt1 = tt0;
+  if (P.vazia()) {
+    for (std::size_t k = 0; k < n; k++) {
+      checa(k);
+      if (falha(faz_linha(k, x, s, marca))) return false;
+    }
+  } else {
+    const std::size_t nsub = P.ini.size() - 1;
+    int rc_geral = 0;
+    std::vector<std::vector<double>> xs(static_cast<std::size_t>(nth_part));
+    std::vector<std::vector<std::uint32_t>> ss(static_cast<std::size_t>(nth_part)),
+        ms(static_cast<std::size_t>(nth_part));
+    // o rascunho das outras threads alocado aqui, fora da regiao paralela (um bad_alloc la dentro
+    // derrubaria o processo em vez de voltar ao R)
+    for (std::size_t t = 1; t < static_cast<std::size_t>(nth_part); t++) {
+      xs[t].assign(n, 0.0); ss[t].assign(n, 0); ms[t].assign(n, 0);
+    }
+#ifdef _OPENMP
+#pragma omp parallel num_threads(nth_part)
+#endif
+    {
+#ifdef _OPENMP
+      const std::size_t eu = static_cast<std::size_t>(omp_get_thread_num());
+#else
+      const std::size_t eu = 0;
+#endif
+      std::vector<double>& xx = eu == 0 ? x : xs[eu];
+      std::vector<std::uint32_t>& s1 = eu == 0 ? s : ss[eu];
+      std::vector<std::uint32_t>& m1 = eu == 0 ? marca : ms[eu];
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+      for (long q = 0; q < static_cast<long>(nsub); q++) {
+        int rc_visto;
+#ifdef _OPENMP
+#pragma omp atomic read
+#endif
+        rc_visto = rc_geral;
+        if (rc_visto != 0) continue;
+        const std::size_t sq = static_cast<std::size_t>(q);
+        for (std::size_t t = P.ini[sq]; t < P.ini[sq + 1]; t++) {
+          const int rc = faz_linha(P.nos[t], xx, s1, m1);
+          if (rc != 0) {
+#ifdef _OPENMP
+#pragma omp atomic write
+#endif
+            rc_geral = rc;
+            break;
+          }
+        }
+      }
+    }
+    if (falha(rc_geral)) return false;
+    tt1 = diag_t ? agora() : 0.0;
+    // a marca da thread 0 so tem selos das linhas dela (k + 1), que o topo nao repete
+    for (std::size_t q = 0; q < P.topo.size(); q++) {
+      checa(q);
+      if (falha(faz_linha(P.topo[q], x, s, marca))) return false;
+    }
   }
 
+  const double tt2 = diag_t ? agora() : 0.0;
   if (hibrido) {
     const std::size_t T = T_cauda;
     // S = A_TT, guardada ja no lugar do fator: a coluna j da cauda recebe as linhas j..n-1
@@ -503,6 +677,10 @@ bool cholesky(const Csc& au, const Simbolica& sb, Csc& L) {
     if (!fatora_cauda(c, nth)) return false;
   }
 
+  if (diag_t)
+    REprintf("[t3 chol] n %zu cauda %zu: subarvores %.3f s (%zu), topo %.3f s (%zu nos), cauda %.3f s, threads %d\n",
+             n, T_cauda, tt1 - tt0, P.vazia() ? std::size_t(0) : P.ini.size() - 1, tt2 - tt1,
+             P.vazia() ? n : P.topo.size(), agora() - tt2, nth_part);
   L = Csc(n, n);
   L.linha.reserve(nz);
   L.valor.reserve(nz);
@@ -627,8 +805,8 @@ Csc permuta_sim(const Csc& a, const std::vector<std::size_t>& perm) {
 //
 // O grafo quociente e o que torna isto pagavel: uma variavel eliminada vira um ELEMENTO que
 // guarda o clique que ela criou, entao o preenchimento nunca e materializado.
-std::vector<std::size_t> grau_minimo(const Csc& a, double teto, double teto_trabalho,
-                                     double* trabalho) {
+std::vector<std::size_t> grau_minimo_exato(const Csc& a, double teto, double teto_trabalho,
+                                           double* trabalho) {
   const std::size_t n = a.ncol;
   std::vector<std::size_t> ordem;
   if (n == 0) return ordem;

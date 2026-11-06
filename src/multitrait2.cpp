@@ -657,7 +657,10 @@ static AjusteMT caminha_mt(DesenhoMT& d, const std::vector<double>* theta0,
   const std::vector<char> sem_par = residuos_sem_par(d);
   for (std::size_t k = 0; k < theta.size(); k++) if (sem_par[k]) theta[k] = 0.0;
   R.partida = bruto(theta);
-  CacheSimbolica cs;
+  // o cache vai junto com o ajuste: residuos_mt() reaproveita a ordem e o simbolico no fim
+  // (a ordenacao de grau minimo, serial, era ~17% de um model_mt de 100 mil; E0, 2026-11-02)
+  R.cache = std::make_shared<CacheSimbolica>();
+  CacheSimbolica& cs = *R.cache;
   AvaliacaoMT cur = avalia_mt(d, theta, &cs);
   if (cs.pronto) { R.bloco_denso = bloco_denso_simbolico(cs.sb); R.colunas_fator = cs.sb.n; }
   if (!cur.ok) {

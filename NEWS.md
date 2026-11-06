@@ -1,5 +1,23 @@
 # uaitrem 0.5.0
 
+## Speed
+
+* The sparse Cholesky factorization and the selected inverse now use subtrees of the elimination
+  tree (Geist and Ng, 1989), and the selected inverse reads the columns of the dense tail by direct
+  index. The results are bit for bit the same as before, with any number of threads. In simulation
+  (10 iterations of REML, 16 threads, median of 3 runs), a pedigree model of 1 million animals went
+  from 36.7 to 11.2 min, and `model_mt()` with 100,000 animals from 6.2 to 3.3 min.
+* `pedigree()` no longer clears a full vector for each animal when it calculates the inbreeding. In
+  simulation, 1 million animals went from 71 s to 2 s, with the same F bit for bit.
+* `model_mt()` uses the ordering and the symbolic factor of the fit again for the residuals, and does
+  not calculate them a second time. The results are bit for bit the same. In simulation, 100,000
+  animals went from 5.6 to 4.5 min.
+* The approximate minimum degree ordering (Amestoy, Davis and Duff, 1996) is available with the
+  environment variable `UAITREM_ORDEM=amd`. The default stays the exact minimum degree. This order
+  changes the rounding and the point where a fit stops. In our checks the -2logL changed by 9e-11
+  (relative) or less, and the components by 5e-5 or less. Near a covariance boundary the likelihood
+  is flat, and the components changed by up to 1e-4.
+
 ## New
 
 * The new name of the package is `uaitrem`, for UAI-TREM: Unravelling Additive and Indirect

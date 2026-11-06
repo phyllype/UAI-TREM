@@ -327,7 +327,10 @@ std::vector<double> endogamia(const Pedigree& p) {
     const std::int64_t s = p.pai[i], t = p.mae[i];
     if (s < 0 || t < 0) { f[i] = 0.0; continue; }
 
-    std::fill(l.begin(), l.end(), 0.0);
+    // l ja esta todo em zero aqui: cada entrada que o animal anterior tocou entrou na fila e foi
+    // zerada ao sair dela (l[j] = 0.0), e a fila termina vazia. Zerar o vetor inteiro a cada
+    // animal custava 8 n bytes por animal, O(n^2) no pedigree, e era a primeira parede de
+    // tempo num pedigree de 1 milhao de animais ou mais.
     l[i] = 1.0;
     fila.push(i);
     na_fila[i] = 1;

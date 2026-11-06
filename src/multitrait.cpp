@@ -950,7 +950,8 @@ double neg2logl_densa_V_mt(const DesenhoMT& d, const std::vector<double>& theta)
 // eq_fixa[j*t + tau], Z caracteristica-major no coeficiente), o residuo condicional por
 // celula observada e Var(e^_{r,tau}) = R0[tau,tau] - w_{r,tau}' C^-1 w_{r,tau}, com os pares
 // de uma linha lidos da inversa seletiva (estao no padrao: a montagem empurra todos eles).
-ResiduosMT residuos_mt(const DesenhoMT& d, const std::vector<double>& theta) {
+ResiduosMT residuos_mt(const DesenhoMT& d, const std::vector<double>& theta,
+                       const CacheSimbolica* cache) {
   ResiduosMT S;
   const std::size_t t = d.t;
   S.t = t;
@@ -958,9 +959,18 @@ ResiduosMT residuos_mt(const DesenhoMT& d, const std::vector<double>& theta) {
   if (theta.size() != d.modelo.ntheta) return S;
   MontadoMT M = monta_mme_mt(d, theta);
   if (!M.ok) return S;
-  const std::vector<std::size_t> perm = grau_minimo(M.c);
+  // A ORDEM E O SIMBOLICO DO AJUSTE quando o padrao e o mesmo (a assinatura do ultimo padrao que o
+  // caminho fatorou), como no residuos_ar1: refazer o grau minimo aqui era ~70 s de um ajuste de
+  // 417 s num model_mt de 100 mil (E0, 2026-11-02). grau_minimo() so le o padrao, entao com o mesmo
+  // padrao a ordem e a mesma e o resultado e o mesmo bit a bit; com outro padrao, refaz como antes.
+  const bool reusa = cache && cache->pronto && cache->assinatura == assinatura_padrao(M.c);
+  std::vector<std::size_t> perm_local;
+  Simbolica sb_local;
+  if (!reusa) perm_local = grau_minimo(M.c);
+  const std::vector<std::size_t>& perm = reusa ? cache->perm : perm_local;
   const Csc pc = permuta_sim(M.c, perm);
-  const Simbolica sb = simbolica(pc);
+  if (!reusa) sb_local = simbolica(pc);
+  const Simbolica& sb = reusa ? cache->sb : sb_local;
   Csc L;
   if (!cholesky(pc, sb, L)) return S;
   std::vector<double> pb(M.total);

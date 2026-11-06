@@ -192,6 +192,25 @@ std::uint64_t assinatura_padrao(const Csc&);
 // recebe as entradas lidas (a medida deterministica do custo da ordenacao)
 std::vector<std::size_t> grau_minimo(const Csc&, double teto = 0.0, double teto_trabalho = 0.0,
                                      double* trabalho = nullptr);
+// a ordenacao por grau minimo EXATO (linalg.cpp) e a AMD (ordem.cpp); grau_minimo() escolhe pelo
+// UAITREM_ORDEM do ambiente ("gm" ou "amd"); com teto ou trabalho pedido, sempre o exato
+std::vector<std::size_t> grau_minimo_exato(const Csc&, double teto = 0.0, double teto_trabalho = 0.0,
+                                           double* trabalho = nullptr);
+std::vector<std::size_t> ordem_amd(const Csc&);
+int modo_ordem();
+// PARTICAO DA ARVORE DE ELIMINACAO em subarvores disjuntas para as threads (linalg.cpp). Os nos
+// >= limite (a cauda densa) e os que foram divididos ficam no TOPO, feito depois (fatoracao) ou
+// antes (inversa seletiva) das subarvores. Vazia (ini.size() < 2) quando nao compensa: quem chama
+// segue no caminho serial. As subarvores vem da mais pesada para a mais leve; dentro de cada uma,
+// os nos em ordem crescente.
+struct Particao {
+  std::vector<std::uint32_t> topo;
+  std::vector<std::size_t> ini;
+  std::vector<std::uint32_t> nos;
+  bool vazia() const { return ini.size() < 2; }
+};
+Particao particao_arvore(const std::vector<std::int64_t>& pai, const std::vector<double>& peso,
+                         std::size_t limite, int nth);
 
 // ---- selinv.cpp
 struct SelInv {
@@ -1017,6 +1036,9 @@ DesenhoMT monta_desenho_mt(Modelo, const std::vector<std::string>&, const Tabela
 std::vector<std::string> nomes_theta_do_mt(const DesenhoMT&);
 struct AjusteMT {
   bool convergiu = false;
+  // o cache simbolico (ordem e fator simbolico) do caminho que deu este ajuste: residuos_mt()
+  // reaproveita quando o padrao e o mesmo, em vez de refazer a ordenacao no fim
+  std::shared_ptr<CacheSimbolica> cache;
   // bloco denso final do fator e total de colunas: o k de k^3 por iteracao
   std::size_t bloco_denso = 0, colunas_fator = 0;
   std::size_t iters = 0;
@@ -1238,7 +1260,8 @@ struct ResiduosMT {
   std::size_t t = 0, nlin = 0, fora = 0;
   std::vector<double> residuo, ajustado, ajustado_fixo, variancia;
 };
-ResiduosMT residuos_mt(const DesenhoMT& d, const std::vector<double>& theta);
+ResiduosMT residuos_mt(const DesenhoMT& d, const std::vector<double>& theta,
+                       const CacheSimbolica* cache = nullptr);
 ResiduosMT residuos_ar1(const DesenhoAR& d, const std::vector<double>& theta);
 // bootstrap parametrico preparado do AR(1)/CAR(1) univariado (residuos.cpp tem o do model())
 std::unique_ptr<PreparoNulos> prepara_nulos_ar1(DesenhoAR&& d, const std::vector<double>& theta,

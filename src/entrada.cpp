@@ -177,6 +177,7 @@ namespace {
 struct PadraoVisto {
   std::uint64_t assinatura = 0;
   std::size_t n = 0, nnz = 0;
+  int modo = 0;                 // a ordenacao que fez a permutacao (UAITREM_ORDEM)
   br::CacheSimbolica cs;
 };
 std::vector<PadraoVisto> g_padroes;
@@ -185,12 +186,12 @@ br::CacheSimbolica& simbolica_do_padrao(const br::Csc& a) {
   const std::uint64_t h = br::assinatura_padrao(a);
   for (std::size_t k = 0; k < g_padroes.size(); k++)
     if (g_padroes[k].assinatura == h && g_padroes[k].n == a.ncol &&
-        g_padroes[k].nnz == a.nnz()) {
+        g_padroes[k].nnz == a.nnz() && g_padroes[k].modo == br::modo_ordem()) {
       std::rotate(g_padroes.begin() + k, g_padroes.begin() + k + 1, g_padroes.end());
       return g_padroes.back().cs;
     }
   PadraoVisto p;
-  p.assinatura = h; p.n = a.ncol; p.nnz = a.nnz();
+  p.assinatura = h; p.n = a.ncol; p.nnz = a.nnz(); p.modo = br::modo_ordem();
   p.cs.perm = br::grau_minimo(a);
   p.cs.sb = br::simbolica(br::permuta_sim(a, p.cs.perm));
   p.cs.pronto = true;
@@ -1561,7 +1562,7 @@ SEXP R_ajustar_mt(SEXP dados, SEXP nomes, SEXP alvos, SEXP tnome, SEXP tcol, SEX
     br::ResiduosMT res;
     if (!r.theta.empty()) {
       try {
-        res = br::residuos_mt(d, r.theta);
+        res = br::residuos_mt(d, r.theta, r.cache.get());
       } catch (const br::Interrompido&) {
         throw;
       } catch (const std::exception& e) {
