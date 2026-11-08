@@ -379,8 +379,9 @@ and the citation below is the only thing asked there.
 
 If this package contributed to published work, please cite it:
 
-> Freitas, F. A. O. (2026). UAI-TREM: genetic parameters, breeding values and
-> genomic prediction in R. R package version 0.4.0.
+> Freitas, F. A. O. (2026). UAI-TREM: Unravelling Additive and Indirect genetic
+> effects with Time-dependent Random Effect Models. R package version 0.5.0.
+> https://github.com/phyllype/UAI-TREM
 
 Developed during doctoral research at the Escola Superior de Agricultura Luiz de
 Queiroz (ESALQ), Universidade de São Paulo, and at Purdue University, supported by
